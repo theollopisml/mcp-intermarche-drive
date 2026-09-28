@@ -5,6 +5,7 @@ type RawObject = Record<string, unknown>;
 export interface CartState {
   cart: Cart;
   rawItems: RawObject[];
+  remoteWritable?: boolean;
 }
 
 export interface CartChange {

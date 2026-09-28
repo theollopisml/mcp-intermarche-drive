@@ -133,14 +133,15 @@ test("add sends absolute quantity and explicit substitution events", async () =>
   const client = new IntermarcheClient(baseConfig, browser);
   const cart = await client.addToCart("P1", 2, false);
   assert.equal(cart.quantityTotal, 3);
-  const write = browser.calls.at(-1);
-  assert.ok(write);
-  const payload = JSON.parse(write.body!) as { events: Array<Record<string, unknown>> };
-  assert.equal(payload.events[0].type, "QUANTITY");
-  assert.equal(payload.events[0].quantity, 3);
-  assert.equal(payload.events[0].trackingCode, undefined);
-  assert.equal(payload.events[1].type, "PRODUCT_SUBSTITUTION");
-  assert.equal(payload.events[1].acceptSubstitution, false);
+  const quantityPayload = JSON.parse(browser.calls[1].body!) as { events: Array<Record<string, unknown>> };
+  const substitutionPayload = JSON.parse(browser.calls[2].body!) as { events: Array<Record<string, unknown>> };
+  assert.equal(quantityPayload.events.length, 1);
+  assert.equal(quantityPayload.events[0].type, "QUANTITY");
+  assert.equal(quantityPayload.events[0].quantity, 3);
+  assert.equal(quantityPayload.events[0].trackingCode, undefined);
+  assert.equal(substitutionPayload.events.length, 1);
+  assert.equal(substitutionPayload.events[0].type, "PRODUCT_SUBSTITUTION");
+  assert.equal(substitutionPayload.events[0].acceptSubstitution, false);
 });
 
 test("concurrent cart mutations serialize the full read-modify-write cycle", async () => {
@@ -153,6 +154,75 @@ test("concurrent cart mutations serialize the full read-modify-write cycle", asy
   assert.equal(first.quantityTotal, 3);
   assert.equal(second.quantityTotal, 5);
   assert.equal(browser.quantity, 5);
+});
+
+test("a rejected site cart id reads the visible basket and blocks writes", async () => {
+  class StaleCartBrowser extends FakeBrowser {
+    override async evaluate<T>(expression: string): Promise<T> {
+      if (expression.includes("url:location.href")) {
+        return {
+          url: "https://www.intermarche.com/accueil",
+          title: "Intermarché",
+          session: { "itm-store": JSON.stringify({ reference: "10686" }) },
+          local: { "persist:cart": JSON.stringify({
+            basketId: JSON.stringify("cart-1"),
+            subCarts: JSON.stringify([{ type: "PDV", qty: 1, total: 2.15, items: {
+              "5124": { qty: 1, total: 2.15, product: {
+                id: "5124", prices: { productPrice: { value: 2.15 } },
+                informations: { title: "Yaourt", brand: "Yaos" },
+              } },
+            } }]),
+          }) },
+        } as T;
+      }
+      return super.evaluate<T>(expression);
+    }
+
+    override async fetch(base: string, url: string, options: Parameters<FakeBrowser["fetch"]>[2] = {}) {
+      if (url.includes("anonymousCartId=cart-1")) {
+        this.calls.push({ url, method: options.method ?? "GET", body: options.body });
+        return {
+          status: 404,
+          ok: false,
+          statusText: "Not Found",
+          text: () => JSON.stringify({ errors: [{ code: "UNKNOWN_CART_ID" }] }),
+          json: () => ({}),
+        };
+      }
+      return super.fetch(base, url, options);
+    }
+  }
+  const browser = new StaleCartBrowser();
+  const client = new IntermarcheClient(baseConfig, browser);
+  const cart = await client.getCart();
+  assert.equal(cart.items[0].product.id, "5124");
+  assert.equal(cart.quantityTotal, 1);
+  assert.equal(cart.total, 2.15);
+  await assert.rejects(client.addToCart("P1", 1), /aucun panier parallèle ne sera créé/);
+  assert.equal(browser.calls.length, 2);
+  assert.ok(browser.calls.every((call) => call.url.includes("anonymousCartId=cart-1")));
+  assert.ok(browser.calls.every((call) => JSON.parse(call.body!).events.length === 0));
+});
+
+test("missing site cart id does not create an invisible basket", async () => {
+  class NoCartBrowser extends FakeBrowser {
+    override async evaluate<T>(expression: string): Promise<T> {
+      if (expression.includes("url:location.href")) {
+        return {
+          url: "https://www.intermarche.com/drive-catalogue",
+          title: "Intermarché",
+          session: { "itm-store": JSON.stringify({ reference: "10686" }) },
+          local: {},
+        } as T;
+      }
+      return super.evaluate<T>(expression);
+    }
+  }
+  const browser = new NoCartBrowser();
+  const client = new IntermarcheClient(baseConfig, browser);
+  assert.equal((await client.getCart()).quantityTotal, 0);
+  await assert.rejects(client.addToCart("P1", 2), /aucun panier parallèle ne sera créé/);
+  assert.equal(browser.calls.length, 0);
 });
 
 function response(body: unknown): FetchResponse {

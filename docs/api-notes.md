@@ -185,7 +185,9 @@ The client serializes the whole read/modify/write cycle with `cartMutationTail`.
 }
 ```
 
-Adding a product sends an explicit substitution event. The default is `false`. The adapter never turns substitution consent on because the argument was omitted.
+Adding a product sends the quantity event first, then a separate substitution event. The live site ignored the substitution choice when both events were sent together. The default is `false`. The adapter never turns substitution consent on because the argument was omitted.
+
+If Intermarché rejects the basket id visible in `persist:cart` with `UNKNOWN_CART_ID`, `get_cart` reads the visible browser basket snapshot and basket mutations fail with an explicit error. The adapter does not create a new anonymous basket in that case: doing so produced a separate basket that was absent from the website UI.
 
 Absolute quantity events make a repeated low-level request less risky than a delta event. They do not make `add_to_cart` idempotent at the MCP level, because that tool calculates a new target from a fresh cart read.
 
@@ -206,7 +208,7 @@ Do not increase retries as a response to blocking. The correct recovery is to st
 | --- | --- |
 | `Aucun magasin actif` | Store and Drive mode in the visible tab; changed `persist:analytic` shape |
 | Search returns no normalized products | `produits[]` envelope and `itemId` / `libelle` fields |
-| Basket is unexpectedly empty | `persist:cart`, `anonymousCartId`, `carts[].items[]`, and selected store |
+| Basket differs from the website | `persist:cart`, `anonymousCartId`, `carts[].items[]`, and selected store; do not create a second anonymous basket |
 | HTTP 400 after a write | Event names, required headers, last-synchronized snapshot shape |
 | HTTP 401/403 after login or reload | Restart the MCP process to rebuild cached request identifiers, then inspect DataDome state |
 | HTTP 429 | Stop requests and wait; do not add parallelism |

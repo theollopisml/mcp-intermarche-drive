@@ -20,6 +20,7 @@ const cartEndpoint = (pdvRef: string) =>
 interface ApiCartSnapshot {
   carts: unknown[];
   synchronizeDateTime: string;
+  amount?: number;
 }
 
 interface CartEvent {
@@ -215,10 +216,17 @@ export class IntermarcheClient implements GroceryClient {
 
   private async readCart(): Promise<CartState> {
     const context = await this.requireStoreContext();
-    this.lastCartSnapshot ??= snapshotFromPersistedCart(context.persistedCart);
-    const raw = await this.cartRequest(context, context.cartId, []);
-    this.lastCartSnapshot = snapshotFromResponse(raw);
-    return normalizeCartResponse(raw, context, context.cartId ?? "");
+    const visibleSnapshot = snapshotFromPersistedCart(context.persistedCart);
+    this.lastCartSnapshot ??= visibleSnapshot;
+    if (!context.cartId) return { ...normalizeCartResponse(visibleSnapshot, context, ""), remoteWritable: false };
+    try {
+      const raw = await this.cartRequest(context, context.cartId, []);
+      this.lastCartSnapshot = snapshotFromResponse(raw);
+      return { ...normalizeCartResponse(raw, context, context.cartId), remoteWritable: true };
+    } catch (error) {
+      if (!String(error).includes("UNKNOWN_CART_ID")) throw error;
+      return { ...normalizeCartResponse(visibleSnapshot, context, context.cartId), remoteWritable: false };
+    }
   }
 
   private async synchronizeQuantity(
@@ -228,7 +236,7 @@ export class IntermarcheClient implements GroceryClient {
     acceptSubstitution?: boolean,
   ): Promise<Cart> {
     const now = new Date().toISOString();
-    const events: CartEvent[] = [
+    const cart = await this.synchronizeEvents(state, [
       {
         catalog: "PDV",
         itemId: productId,
@@ -237,20 +245,23 @@ export class IntermarcheClient implements GroceryClient {
         type: "QUANTITY",
         trackingCode: this.trackingCodes.get(productId),
       },
-    ];
-    if (acceptSubstitution !== undefined) {
-      events.push({
+    ]);
+    if (acceptSubstitution !== undefined && quantity > 0) {
+      return this.synchronizeEvents({ cart, rawItems: [], remoteWritable: true }, [{
         catalog: "PDV",
         itemId: productId,
         acceptSubstitution,
-        dateTime: now,
+        dateTime: new Date().toISOString(),
         type: "PRODUCT_SUBSTITUTION",
-      });
+      }]);
     }
-    return this.synchronizeEvents(state, events);
+    return cart;
   }
 
   private async synchronizeEvents(state: CartState, events: CartEvent[]): Promise<Cart> {
+    if (!state.remoteWritable) {
+      throw new Error("Le panier affiché par Intermarché n'est pas accessible par l'API. Modifie-le dans la page du magasin; aucun panier parallèle ne sera créé.");
+    }
     const context = await this.requireStoreContext();
     const raw = await this.cartRequest(context, state.cart.id || context.cartId, events);
     this.lastCartSnapshot = snapshotFromResponse(raw);
@@ -416,6 +427,7 @@ export function snapshotFromPersistedCart(value: unknown): ApiCartSnapshot {
   });
   return {
     carts,
+    amount: carts.reduce((total, candidate) => total + (numeric(asObject(candidate)?.amount) ?? 0), 0),
     synchronizeDateTime:
       typeof state?.synchronizedAt === "string" ? state.synchronizedAt : new Date().toISOString(),
   };
